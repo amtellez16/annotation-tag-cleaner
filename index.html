@@ -1965,6 +1965,16 @@ function URLSafetyTab({ unsafeTags, replacements, onSetReplacement }) {
 }
  
 // ─── EXPORT TAB ───────────────────────────────────────────────────────────────
+  
+  // Helper: convert 2D array of rows into an .xlsx file buffer
+function rowsToXlsxBuffer(rows, sheetName = 'Sheet1') {
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, sheetName);
+  // Return an ArrayBuffer suitable for JSZip
+  return XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+}
+  
 function ExportTab({ contentFiles, masterFile, masterRows, masterTagsToAdd, replacements, colIdx }) {
   const [exporting, setExporting] = useState(false);
   const [done,      setDone]      = useState(false);
@@ -1989,58 +1999,69 @@ function ExportTab({ contentFiles, masterFile, masterRows, masterTagsToAdd, repl
   }, [masterFile, replacements]);
  
   async function doExport() {
-    setExporting(true); setDone(false);
-    try {
-      const zip = new JSZip();
- 
-      // Modified content sheets
-      contentFiles.forEach(f => {
-        const updated  = applyReplacements(f.rows, colIdx, replacements);
-        // Always export as CSV regardless of original format
-        const outName  = f.name.replace(/\.(xlsx|xls|tsv)$/i, '.csv');
-        zip.file('content/' + outName, Papa.unparse(updated));
-      });
- 
-      // Updated master sheet
-      // 1. Rename existing master entries that were replaced (e.g. "The Univ…" → "Univ…")
-      const renamedInMaster = new Set(); // track which dest tags already got a master row
-      const updatedMaster = masterRows.map((row, ri) => {
-        if (ri === 0) return [...row]; // preserve header row
-        const masterTag = (row[MASTER_TAG_COL] || '').toString().trim();
-        const dest = replacements.get(masterTag);
-        if (dest && dest !== DELETE_SENTINEL) {
-          renamedInMaster.add(dest);
-          const newRow = [...row];
-          newRow[MASTER_TAG_COL] = dest;
-          return newRow;
-        }
-        return [...row];
-      });
-      // 2. Append tags explicitly added via Missing Tags tab (skip any already renamed in)
-      masterTagsToAdd.forEach(({ tag, group }) => {
-        if (renamedInMaster.has(tag)) return; // already covered by a rename above
-        const row = Array(Math.max(2, updatedMaster[0]?.length || 2)).fill('');
-        row[MASTER_GROUP_COL] = group || '';
-        row[MASTER_TAG_COL]   = tag;
-        updatedMaster.push(row);
-      });
-      // Always export master if there were any replacements or additions
-      const masterChanged = masterTagsToAdd.length > 0 || replacements.size > 0;
-      if (masterChanged) {
-        zip.file('master/' + (masterFile?.name || 'master.csv'), Papa.unparse(updatedMaster));
+  setExporting(true); setDone(false);
+  try {
+    const zip = new JSZip();
+
+    // ── Modified content sheets → XLSX ───────────────────────────────
+    contentFiles.forEach(f => {
+      const updated = applyReplacements(f.rows, colIdx, replacements);
+
+      // Always export as .xlsx regardless of original format
+      const baseName = f.name.replace(/\.(xlsx|xls|tsv|csv)$/i, '');
+      const outName  = baseName + '.xlsx';
+
+      const wbArray = rowsToXlsxBuffer(updated, 'Sheet1');
+      zip.file('content/' + outName, wbArray);
+    });
+
+    // ── Updated master sheet → XLSX ─────────────────────────────────
+    // 1. Rename existing master entries that were replaced
+    const renamedInMaster = new Set();
+    const updatedMaster = masterRows.map((row, ri) => {
+      if (ri === 0) return [...row]; // header
+      const masterTag = (row[MASTER_TAG_COL] || '').toString().trim();
+      const dest = replacements.get(masterTag);
+      if (dest && dest !== DELETE_SENTINEL) {
+        renamedInMaster.add(dest);
+        const newRow = [...row];
+        newRow[MASTER_TAG_COL] = dest;
+        return newRow;
       }
- 
-      const blob = await zip.generateAsync({ type: 'blob' });
-      const url  = URL.createObjectURL(blob);
-      const a    = document.createElement('a');
-      a.href = url; a.download = 'latino-usa-tags-updated.zip'; a.click();
-      URL.revokeObjectURL(url);
-      setDone(true);
-    } catch (e) {
-      alert('Export failed: ' + (e.message || e));
+      return [...row];
+    });
+
+    // 2. Append tags added via Missing Tags tab
+    masterTagsToAdd.forEach(({ tag, group }) => {
+      if (renamedInMaster.has(tag)) return;
+      const row = Array(Math.max(2, updatedMaster[0]?.length || 2)).fill('');
+      row[MASTER_GROUP_COL] = group || '';
+      row[MASTER_TAG_COL]   = tag;
+      updatedMaster.push(row);
+    });
+
+    const masterChanged = masterTagsToAdd.length > 0 || replacements.size > 0;
+    if (masterChanged) {
+      const masterBase = (masterFile?.name || 'master').replace(/\.(xlsx|xls|tsv|csv)$/i, '');
+      const masterName = masterBase + '.xlsx';
+      const masterWbArray = rowsToXlsxBuffer(updatedMaster, 'Master');
+      zip.file('master/' + masterName, masterWbArray);
     }
-    setExporting(false);
+
+    // ── Build ZIP and download ───────────────────────────────────────
+    const blob = await zip.generateAsync({ type: 'blob' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url;
+    a.download = 'latino-usa-tags-updated.zip';
+    a.click();
+    URL.revokeObjectURL(url);
+    setDone(true);
+  } catch (e) {
+    alert('Export failed: ' + (e.message || e));
   }
+  setExporting(false);
+}
  
   const deletions = useMemo(() =>
     [...replacements.values()].filter(v => v === DELETE_SENTINEL).length,
@@ -2057,10 +2078,11 @@ function ExportTab({ contentFiles, masterFile, masterRows, masterTagsToAdd, repl
   return (
     <div style={{ maxWidth: 920, margin: '0 auto', padding: '36px 28px' }}>
       <h2 style={{ fontSize:22, fontWeight:800, marginBottom:6 }}>Export</h2>
-      <p style={{ color:'#666', fontSize:14, marginBottom:28, lineHeight:1.5 }}>
-        Downloads a ZIP with all {contentFiles.length} updated content sheets as CSV (in a <code style={{background:'#F0F0F0',padding:'1px 4px',borderRadius:3}}>content/</code> folder).
-        {(masterTagsToAdd.length > 0 || replacements.size > 0) && ' Your master sheet will also be updated — existing entries renamed in place, new entries appended at the bottom.'}
-        {' '}Excel and TSV files are converted to CSV on export.
+      <p style={{ ... }}>
+  Downloads a ZIP with all {contentFiles.length} updated content sheets as Excel files
+  (<code style={{background:'#F0F0F0',padding:'1px 4px',borderRadius:3}}>.xlsx</code>) in a
+  <code style={{background:'#F0F0F0',padding:'1px 4px',borderRadius:3}}>content/</code> folder.
+  {(masterTagsToAdd.length > 0 || replacements.size > 0) && ' Your master sheet will also be updated — existing entries renamed in place, new entries appended at the bottom.'}
       </p>
  
       {/* Stats */}
