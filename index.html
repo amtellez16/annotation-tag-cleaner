@@ -40,7 +40,7 @@ const MASTER_GROUP_COL = 0; // Column A
 const MASTER_TAG_COL   = 1; // Column B
  
 // Content sheets tag column (0-indexed, P = 15)
-const DEFAULT_TAG_COL  = 15;
+const DEFAULT_TAG_COL  = 3; // Column D
  
 // ─── UTILITIES ───────────────────────────────────────────────────────────────
 function levenshtein(a, b) {
@@ -474,9 +474,9 @@ function TabBar({ tabs, active, onChange }) {
 function UploadTab({ onParsed }) {
   const [masterRaw,     setMasterRaw]     = useState(null);
   const [contentRaw,    setContentRaw]    = useState([]);
-  const [colLetter,     setColLetter]     = useState('P');
-  const [masterTagCol,  setMasterTagCol]  = useState('B');
-  const [masterGrpCol,  setMasterGrpCol]  = useState('A');
+  const [colLetter,     setColLetter]     = useState('D');
+  const [masterTagCol,  setMasterTagCol]  = useState('A');
+  const [masterGrpCol,  setMasterGrpCol]  = useState('B');
   const [hasHeader,     setHasHeader]     = useState(true);
   const [loading,       setLoading]       = useState(false);
   const [error,         setError]         = useState(null);
@@ -691,11 +691,11 @@ function UploadTab({ onParsed }) {
               value={masterTagCol}
               onChange={e => setMasterTagCol(e.target.value.replace(/[^a-zA-Z]/g,''))}
               maxLength={1}
-              title="Column containing canonical tags (default: B)"
+              title="Column containing canonical tags (default: A)"
             />
             {masterPreview?.tagHeader
               ? <span style={{ color: BRAND_DARK, fontSize:12, fontWeight:600 }}>"{masterPreview.tagHeader}"</span>
-              : <span style={{ color:'#888', fontSize:12 }}>default: B</span>}
+              : <span style={{ color:'#888', fontSize:12 }}>default: A</span>}
           </div>
           <div style={{ display:'flex', alignItems:'center', gap:10 }}>
             <span style={{ fontSize:13, color:'#555', whiteSpace:'nowrap' }}>Group column:</span>
@@ -704,11 +704,11 @@ function UploadTab({ onParsed }) {
               value={masterGrpCol}
               onChange={e => setMasterGrpCol(e.target.value.replace(/[^a-zA-Z]/g,''))}
               maxLength={1}
-              title="Column containing tag group/category (default: A)"
+              title="Column containing tag group/category (default: B)"
             />
             {masterPreview?.grpHeader
               ? <span style={{ color: BRAND_DARK, fontSize:12, fontWeight:600 }}>"{masterPreview.grpHeader}"</span>
-              : <span style={{ color:'#888', fontSize:12 }}>default: A</span>}
+              : <span style={{ color:'#888', fontSize:12 }}>default: B</span>}
           </div>
           <label style={{ display:'flex', alignItems:'center', gap:8, cursor:'pointer', fontSize:13, color:'#555' }}>
             <input
@@ -736,7 +736,7 @@ function UploadTab({ onParsed }) {
         />
         {contentHeaders
           ? <span style={{ color: BRAND_DARK, fontSize:13, fontWeight:600 }}>"{contentHeaders}" (col {colLetter.toUpperCase() || '?'})</span>
-          : <span style={{ color:'#888', fontSize:13 }}>Column <strong>{colLetter.toUpperCase() || '?'}</strong> = index {colIdx} (default: P = 15)</span>
+          : <span style={{ color:'#888', fontSize:13 }}>Column <strong>{colLetter.toUpperCase() || '?'}</strong> = index {colIdx} (default: D = 3)</span>
         }
       </div>
  
@@ -1965,19 +1965,73 @@ function URLSafetyTab({ unsafeTags, replacements, onSetReplacement }) {
 }
  
 // ─── EXPORT TAB ───────────────────────────────────────────────────────────────
-  
-  // Helper: convert 2D array of rows into an .xlsx file buffer
+
+// Convert Excel-style fraction-of-a-day to h:mm:ss text
+function fractionToTimecode(f) {
+  if (typeof f !== 'number' || !isFinite(f)) return String(f);
+  const totalSeconds = Math.round(f * 24 * 60 * 60);
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = totalSeconds % 60;
+  const pad = n => n.toString().padStart(2, '0');
+  return `${h}:${pad(m)}:${pad(s)}`;
+}
+
+// Helper: convert 2D array of rows into an .xlsx file buffer
+// and force Start/Stop columns (A,B) to be text timecodes.
 function rowsToXlsxBuffer(rows, sheetName = 'Sheet1') {
-  const ws = XLSX.utils.aoa_to_sheet(rows);
+  const START_COL_INDEX = 0; // column A
+  const STOP_COL_INDEX  = 1; // column B
+
+  const ws = {};
+  const range = { s: { r: 0, c: 0 }, e: { r: rows.length - 1, c: 0 } };
+
+  rows.forEach((row, r) => {
+    if (!row) return;
+    range.e.c = Math.max(range.e.c, row.length - 1);
+    row.forEach((value, c) => {
+      const cellAddress = XLSX.utils.encode_cell({ r, c });
+      let cellValue = value;
+
+      // Header row: write as plain strings
+      if (r === 0) {
+        if (cellValue === null || cellValue === undefined) return;
+        ws[cellAddress] = { t: 's', v: String(cellValue) };
+        return;
+      }
+
+      // For Start/Stop columns, keep or convert to h:mm:ss text
+      if (c === START_COL_INDEX || c === STOP_COL_INDEX) {
+        if (typeof cellValue === 'number') {
+          // Convert numeric fraction to h:mm:ss
+          cellValue = fractionToTimecode(cellValue);
+        }
+        // If it's already a string like "0:00:09", just keep it
+        ws[cellAddress] = { t: 's', v: String(cellValue) };
+        return;
+      }
+
+      // All other cells: write numbers as numbers, others as strings
+      if (cellValue === null || cellValue === undefined) return;
+      if (typeof cellValue === 'number') {
+        ws[cellAddress] = { t: 'n', v: cellValue };
+      } else {
+        ws[cellAddress] = { t: 's', v: String(cellValue) };
+      }
+    });
+  });
+
+  ws['!ref'] = XLSX.utils.encode_range(range);
+
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, sheetName);
-  // Return an ArrayBuffer suitable for JSZip
   return XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
 }
-  
+
 function ExportTab({ contentFiles, masterFile, masterRows, masterTagsToAdd, replacements, colIdx }) {
   const [exporting, setExporting] = useState(false);
   const [done,      setDone]      = useState(false);
+  const [zipName,   setZipName]   = useState('project-tags-updated.zip'); // default name
  
   const affected = useMemo(() => {
     const s = new Set();
@@ -2053,7 +2107,7 @@ function ExportTab({ contentFiles, masterFile, masterRows, masterTagsToAdd, repl
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
     a.href = url;
-    a.download = 'latino-usa-tags-updated.zip';
+    a.download = zipName && zipName.trim() ? zipName.trim() : 'project-tags-updated.zip';
     a.click();
     URL.revokeObjectURL(url);
     setDone(true);
@@ -2193,14 +2247,25 @@ function ExportTab({ contentFiles, masterFile, masterRows, masterTagsToAdd, repl
  
       {done && (
         <div style={{ background:'#E8F5E9', color:'#1B5E20', padding:'14px 18px', borderRadius:9, marginBottom:20, fontSize:14, fontWeight:500 }}>
-          ✅ Downloaded! Check your Downloads folder for <strong>latino-usa-tags-updated.zip</strong>
+    ✅ Downloaded! Check your Downloads folder for <strong>{zipName || 'project-tags-updated.zip'}</strong>
         </div>
       )}
- 
-      <button onClick={doExport} disabled={exporting}
-        style={{ ...S.btn('primary'), fontSize:15, padding:'12px 28px', opacity: exporting ? 0.5 : 1 }}>
-        {exporting ? '⏳ Preparing ZIP…' : '📦 Download All Updated Sheets'}
-      </button>
+
+<h3 style={{ fontSize:22, fontWeight:800, marginBottom:6 }}>Filename</h3>
+        <div style={{ ...S.card, marginBottom: 20, padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 10 }}>
+  <span style={{ fontSize: 13, fontWeight: 600, color: '#555', whiteSpace: 'nowrap' }}>Save ZIP as:</span>
+  <input
+    style={{ ...S.input, maxWidth: 260, fontSize: 13 }}
+    value={zipName}
+    onChange={e => setZipName(e.target.value)}
+    placeholder="project-tags-updated.zip"
+  />
+</div>
+
+<button onClick={doExport} disabled={exporting}
+  style={{ ...S.btn('primary'), fontSize:15, padding:'12px 28px', opacity: exporting ? 0.5 : 1 }}>
+  {exporting ? '⏳ Preparing ZIP…' : '📦 Download All Updated Sheets'}
+</button>
     </div>
   );
 }
