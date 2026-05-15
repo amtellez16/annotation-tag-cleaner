@@ -79,7 +79,12 @@ function getUnsafeChars(tag) {
 function deepTrim(s) {
   return String(s).replace(/^[\s\u00A0\u200B\u200C\u200D\uFEFF]+|[\s\u00A0\u200B\u200C\u200D\uFEFF]+$/g, '');
 }
- 
+
+// Consider a row "empty" if all cells are empty or only whitespace / invisible chars
+function isEffectivelyEmptyRow(row) {
+  if (!row) return true;
+  return row.every(cell => deepTrim(cell ?? '') === '');
+}
 function parseTags(cell) {
   if (cell === null || cell === undefined || cell === '') return [];
   return String(cell).split('|').map(deepTrim).filter(Boolean);
@@ -346,19 +351,29 @@ function buildVariationGroups(tags) {
 const DELETE_SENTINEL = '\x00DELETE\x00';
  
 function applyReplacements(rows, colIdx, replacements) {
-  return rows.map((row, i) => {
-    if (i === 0) return row;
+  const out = [];
+  rows.forEach((row, i) => {
+    if (i === 0) {
+      // Always keep the header row
+      out.push(row);
+      return;
+    }
+
+    // Drop rows that are effectively empty (only whitespace / invisible chars)
+    if (isEffectivelyEmptyRow(row)) return;
+
     const tags = parseTags(row[colIdx] || '');
-    if (!tags.length) return row;
-    const updated = [...new Set(
+    const updatedTags = [...new Set(
       tags
         .map(t => replacements.has(t) ? replacements.get(t) : t)
         .filter(t => t !== DELETE_SENTINEL)           // remove deleted tags
     )];
+
     const newRow = [...row];
-    newRow[colIdx] = updated.join(' | ');
-    return newRow;
+    newRow[colIdx] = updatedTags.join(' | ');
+    out.push(newRow);
   });
+  return out;
 }
  
 // ─── STYLE HELPERS ───────────────────────────────────────────────────────────
